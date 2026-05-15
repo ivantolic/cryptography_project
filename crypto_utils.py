@@ -41,6 +41,33 @@ def load_public_key_from_b64(public_key_b64: str) -> x25519.X25519PublicKey:
     return x25519.X25519PublicKey.from_public_bytes(public_key_bytes)
 
 
+def fingerprint_public_key(public_key_b64: str) -> str:
+    """
+    Creates a short SHA-256 fingerprint of a base64 encoded public key.
+
+    The fingerprint can be compared out-of-band by users before accepting
+    a key exchange. This helps users notice possible public key substitution
+    or man-in-the-middle attempts in this educational prototype.
+
+    Example output:
+        A1B2-C3D4-E5F6-7788
+    """
+    public_key_bytes = base64.b64decode(public_key_b64.encode("utf-8"))
+
+    digest = hashes.Hash(hashes.SHA256())
+    digest.update(public_key_bytes)
+    fingerprint_bytes = digest.finalize()
+
+    # First 8 bytes = 16 hex characters.
+    short_fingerprint = fingerprint_bytes[:8].hex().upper()
+
+    # Format as XXXX-XXXX-XXXX-XXXX.
+    return "-".join(
+        short_fingerprint[i:i + 4]
+        for i in range(0, len(short_fingerprint), 4)
+    )
+
+
 def derive_shared_key(
     private_key: x25519.X25519PrivateKey,
     peer_public_key_b64: str,
@@ -142,12 +169,16 @@ if __name__ == "__main__":
     ivan_private_key, ivan_public_key = generate_x25519_key_pair()
     marko_private_key, marko_public_key = generate_x25519_key_pair()
 
+    print("Ivan public key:", ivan_public_key)
+    print("Ivan fingerprint:", fingerprint_public_key(ivan_public_key))
+
+    print("Marko public key:", marko_public_key)
+    print("Marko fingerprint:", fingerprint_public_key(marko_public_key))
+
     # Both users derive the same shared AES key
     ivan_shared_key = derive_shared_key(ivan_private_key, marko_public_key)
     marko_shared_key = derive_shared_key(marko_private_key, ivan_public_key)
 
-    print("Ivan public key:", ivan_public_key)
-    print("Marko public key:", marko_public_key)
     print("Shared keys match:", ivan_shared_key == marko_shared_key)
 
     # Ivan encrypts a message

@@ -33,16 +33,30 @@ def remove_connected_user(username: Optional[str]) -> None:
             del connected_clients[username]
 
 
-def forward_chat_message(message: dict) -> bool:
+def get_recipient_socket(recipient: str) -> Optional[socket.socket]:
     """
-    Forwards a chat message to the intended recipient.
+    Returns the socket for an online recipient.
+    """
+    with clients_lock:
+        return connected_clients.get(recipient)
 
-    Returns True if the recipient is online, False otherwise.
+
+def forward_message_to_recipient(message: dict) -> bool:
+    """
+    Forwards a message to the intended recipient.
+
+    Used for both chat messages and key exchange messages.
+
+    Returns:
+        True if the recipient is online and the message was forwarded.
+        False otherwise.
     """
     recipient = message.get("to")
 
-    with clients_lock:
-        recipient_socket = connected_clients.get(recipient)
+    if not recipient:
+        return False
+
+    recipient_socket = get_recipient_socket(recipient)
 
     if recipient_socket is None:
         return False
@@ -51,16 +65,138 @@ def forward_chat_message(message: dict) -> bool:
     return True
 
 
+def validate_authenticated_sender(
+    message: dict,
+    authenticated_user: Optional[str],
+    client_socket: socket.socket,
+) -> bool:
+    """
+    Checks whether the client is logged in and whether the message sender
+    matches the authenticated username.
+    """
+    if authenticated_user is None:
+        send_json(client_socket, make_error("You must be logged in before sending messages."))
+        return False
+
+    sender = message.get("from")
+
+    if sender != authenticated_user:
+        send_json(client_socket, make_error("Sender username does not match authenticated user."))
+        return False
+
+    return True
+
+
+def handle_register(message: dict, client_socket: socket.socket) -> None:
+    """
+    Handles user registration.
+    """
+    username = message.get("username", "")
+    password = message.get("password", "")
+
+    success = register_user(username, password)
+
+    if success:
+        send_json(client_socket, make_success("Registration successful."))
+        print(f"[REGISTER] User '{username}' registered.")
+    else:
+        send_json(client_socket, make_error("Registration failed. Username may already exist."))
+
+
+def handle_login(
+    message: dict,
+    client_socket: socket.socket,
+    client_address: tuple,
+) -> Optional[str]:
+    """
+    Handles user login.
+
+    Returns:
+        username if login succeeds, otherwise None.
+    """
+    username = message.get("username", "")
+    password = message.get("password", "")
+
+    success = verify_user(username, password)
+
+    if success:
+        register_connected_user(username, client_socket)
+        send_json(client_socket, make_success("Login successful."))
+        print(f"[LOGIN] User '{username}' logged in from {client_address}.")
+        return username
+
+    send_json(client_socket, make_error("Invalid username or password."))
+    return None
+
+
+def handle_chat(
+    message: dict,
+    authenticated_user: Optional[str],
+    client_socket: socket.socket,
+) -> None:
+    """
+    Handles plaintext chat forwarding.
+
+    This will later be replaced with encrypted message forwarding.
+    For now, the server still sees plaintext.
+    """
+    if not validate_authenticated_sender(message, authenticated_user, client_socket):
+        return
+
+    sender = message.get("from")
+    recipient = message.get("to")
+    plaintext = message.get("message")
+
+    delivered = forward_message_to_recipient(message)
+
+    if delivered:
+        print(f"[CHAT] {sender} -> {recipient}: {plaintext}")
+        send_json(client_socket, make_success("Message delivered."))
+    else:
+        send_json(client_socket, make_error(f"User '{recipient}' is not online."))
+
+
+def handle_key_exchange(
+    message: dict,
+    authenticated_user: Optional[str],
+    client_socket: socket.socket,
+) -> None:
+    """
+    Handles X25519 public key forwarding.
+
+    The server only relays public keys between clients.
+    It never receives private keys and cannot derive the shared session key.
+    """
+    if not validate_authenticated_sender(message, authenticated_user, client_socket):
+        return
+
+    sender = message.get("from")
+    recipient = message.get("to")
+    public_key = message.get("public_key")
+
+    if not recipient or not public_key:
+        send_json(client_socket, make_error("Invalid key exchange message."))
+        return
+
+    delivered = forward_message_to_recipient(message)
+
+    if delivered:
+        print(f"[KEY EXCHANGE] Public key forwarded from {sender} to {recipient}.")
+        send_json(client_socket, make_success("Public key delivered."))
+    else:
+        send_json(client_socket, make_error(f"User '{recipient}' is not online."))
+
+
 def handle_client(client_socket: socket.socket, client_address: tuple) -> None:
     """
     Handles one connected client.
 
     Supported phases in this version:
-    - register
-    - login
-    - plaintext chat forwarding
+    - authentication phase: register/login
+    - key exchange phase: public key forwarding
+    - message transmission phase: plaintext chat forwarding for now
 
-    E2EE will be added later.
+    E2EE encrypted message transmission will be added next.
     """
     print(f"[NEW CONNECTION] {client_address} connected.")
 
@@ -72,52 +208,16 @@ def handle_client(client_socket: socket.socket, client_address: tuple) -> None:
             message_type = message.get("type")
 
             if message_type == "register":
-                username = message.get("username", "")
-                password = message.get("password", "")
-
-                success = register_user(username, password)
-
-                if success:
-                    send_json(client_socket, make_success("Registration successful."))
-                    print(f"[REGISTER] User '{username}' registered.")
-                else:
-                    send_json(client_socket, make_error("Registration failed. Username may already exist."))
+                handle_register(message, client_socket)
 
             elif message_type == "login":
-                username = message.get("username", "")
-                password = message.get("password", "")
-
-                success = verify_user(username, password)
-
-                if success:
-                    authenticated_user = username
-                    register_connected_user(username, client_socket)
-
-                    send_json(client_socket, make_success("Login successful."))
-                    print(f"[LOGIN] User '{username}' logged in from {client_address}.")
-                else:
-                    send_json(client_socket, make_error("Invalid username or password."))
+                authenticated_user = handle_login(message, client_socket, client_address)
 
             elif message_type == "chat":
-                if authenticated_user is None:
-                    send_json(client_socket, make_error("You must be logged in before sending messages."))
-                    continue
+                handle_chat(message, authenticated_user, client_socket)
 
-                sender = message.get("from")
-                recipient = message.get("to")
-                plaintext = message.get("message")
-
-                if sender != authenticated_user:
-                    send_json(client_socket, make_error("Sender username does not match authenticated user."))
-                    continue
-
-                delivered = forward_chat_message(message)
-
-                if delivered:
-                    print(f"[CHAT] {sender} -> {recipient}: {plaintext}")
-                    send_json(client_socket, make_success("Message delivered."))
-                else:
-                    send_json(client_socket, make_error(f"User '{recipient}' is not online."))
+            elif message_type == "key_exchange":
+                handle_key_exchange(message, authenticated_user, client_socket)
 
             elif message_type == "logout":
                 if authenticated_user:

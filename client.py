@@ -3,6 +3,13 @@ import getpass
 import threading
 from typing import Optional
 
+from cryptography.hazmat.primitives.asymmetric import x25519
+
+from crypto_utils import (
+    generate_x25519_key_pair,
+    derive_shared_key,
+    fingerprint_public_key,
+)
 from protocol import send_json, receive_json
 
 
@@ -12,6 +19,18 @@ PORT = 5000
 
 current_partner: Optional[str] = None
 partner_lock = threading.Lock()
+
+private_key: Optional[x25519.X25519PrivateKey] = None
+public_key_b64: Optional[str] = None
+
+session_keys: dict[str, bytes] = {}
+session_keys_lock = threading.Lock()
+
+pending_key_exchanges: dict[str, str] = {}
+pending_key_exchanges_lock = threading.Lock()
+
+sent_key_exchanges_to: set[str] = set()
+sent_key_exchanges_lock = threading.Lock()
 
 
 def connect_to_server() -> socket.socket:
@@ -39,6 +58,99 @@ def get_current_partner() -> Optional[str]:
     """
     with partner_lock:
         return current_partner
+
+
+def set_session_key(username: str, key: bytes) -> None:
+    """
+    Stores a derived session key for a specific chat partner.
+    """
+    with session_keys_lock:
+        session_keys[username] = key
+
+
+def get_session_key(username: str) -> Optional[bytes]:
+    """
+    Returns the stored session key for a specific chat partner.
+    """
+    with session_keys_lock:
+        return session_keys.get(username)
+
+
+def list_session_key_users() -> list[str]:
+    """
+    Returns users with established session keys.
+    """
+    with session_keys_lock:
+        return list(session_keys.keys())
+
+
+def store_pending_key_exchange(username: str, peer_public_key_b64: str) -> None:
+    """
+    Stores a received public key until the user manually accepts it.
+    """
+    with pending_key_exchanges_lock:
+        pending_key_exchanges[username] = peer_public_key_b64
+
+
+def get_pending_key_exchange(username: str) -> Optional[str]:
+    """
+    Returns a pending public key for a user, if it exists.
+    """
+    with pending_key_exchanges_lock:
+        return pending_key_exchanges.get(username)
+
+
+def remove_pending_key_exchange(username: str) -> None:
+    """
+    Removes a pending key exchange after it is accepted.
+    """
+    with pending_key_exchanges_lock:
+        pending_key_exchanges.pop(username, None)
+
+
+def list_pending_key_exchanges() -> list[str]:
+    """
+    Returns users with pending key exchange requests.
+    """
+    with pending_key_exchanges_lock:
+        return list(pending_key_exchanges.keys())
+
+
+def has_sent_key_exchange_to(username: str) -> bool:
+    """
+    Checks whether this client has already sent its public key to a user.
+    """
+    with sent_key_exchanges_lock:
+        return username in sent_key_exchanges_to
+
+
+def mark_key_exchange_sent(username: str) -> None:
+    """
+    Marks that this client has sent its public key to a user.
+    """
+    with sent_key_exchanges_lock:
+        sent_key_exchanges_to.add(username)
+
+
+def send_key_exchange(client_socket: socket.socket, sender: str, recipient: str) -> None:
+    """
+    Sends this client's public key to another user.
+
+    The private key never leaves this client.
+    """
+    if public_key_b64 is None:
+        print("[ERROR] Local public key is not available.")
+        return
+
+    send_json(client_socket, {
+        "type": "key_exchange",
+        "from": sender,
+        "to": recipient,
+        "public_key": public_key_b64,
+    })
+
+    mark_key_exchange_sent(recipient)
+    print(f"[KEYX] Public key sent to {recipient}.")
 
 
 def register(client_socket: socket.socket) -> None:
@@ -121,8 +233,8 @@ def receive_messages(client_socket: socket.socket, own_username: str) -> None:
     Continuously listens for incoming messages from the server.
 
     Incoming chat messages are shown immediately.
-    If no chat partner is selected yet, the sender automatically becomes
-    the current chat partner so the user can reply directly.
+    Key exchange messages are stored as pending requests and must be
+    manually accepted with /accept username.
     """
     while True:
         try:
@@ -141,12 +253,38 @@ def receive_messages(client_socket: socket.socket, own_username: str) -> None:
 
                 print("> ", end="", flush=True)
 
+            elif message_type == "key_exchange":
+                sender = message.get("from")
+                peer_public_key = message.get("public_key")
+
+                if not sender or not peer_public_key:
+                    print("\n[KEYX ERROR] Invalid key exchange message.")
+                    print("> ", end="", flush=True)
+                    continue
+
+                store_pending_key_exchange(sender, peer_public_key)
+
+                try:
+                    fingerprint = fingerprint_public_key(peer_public_key)
+                except Exception:
+                    fingerprint = "INVALID-FINGERPRINT"
+
+                print(f"\n[KEYX] Key exchange request from {sender}.")
+                print(f"[KEYX] Public key fingerprint: {fingerprint}")
+                print(f"[KEYX] Verify this fingerprint out-of-band, then type: /accept {sender}")
+
+                if get_current_partner() is None:
+                    set_current_partner(sender)
+                    print(f"[INFO] Current chat partner automatically set to '{sender}'.")
+
+                print("> ", end="", flush=True)
+
             elif message_type == "response":
                 status = message.get("status", "").upper()
                 text = message.get("message", "")
 
-                # Avoid printing delivery confirmations for every sent message.
-                if text != "Message delivered.":
+                # Avoid printing noisy confirmations for every sent message/key.
+                if text not in ("Message delivered.", "Public key delivered."):
                     print(f"\n[{status}] {text}")
                     print("> ", end="", flush=True)
 
@@ -172,20 +310,70 @@ def print_chat_help() -> None:
     """
     print("\nChat started.")
     print("Commands:")
-    print("  /to username   choose who you want to send messages to")
-    print("  /who           show current chat partner")
-    print("  /quit          exit chat")
+    print("  /to username       choose who you want to send messages to")
+    print("  /keyx username     send your X25519 public key to a user")
+    print("  /pending           show pending key exchange requests")
+    print("  /accept username   accept a pending key exchange after verifying fingerprint")
+    print("  /keys              show users with established session keys")
+    print("  /who               show current chat partner")
+    print("  /quit              exit chat")
     print("\nExample:")
     print("  /to marko")
+    print("  /keyx marko")
+    print("  /pending")
+    print("  /accept marko")
     print("  bok marko\n")
+
+
+def handle_accept_key_exchange(client_socket: socket.socket, username: str, peer_username: str) -> None:
+    """
+    Accepts a pending key exchange request.
+
+    This derives and stores the shared session key. If this client has not yet
+    sent its own public key to the peer, it sends it as a response.
+    """
+    global private_key
+
+    if private_key is None:
+        print("[KEYX ERROR] Local private key is not available.")
+        return
+
+    peer_public_key = get_pending_key_exchange(peer_username)
+
+    if peer_public_key is None:
+        print(f"[KEYX] No pending key exchange from {peer_username}.")
+        return
+
+    try:
+        fingerprint = fingerprint_public_key(peer_public_key)
+        shared_key = derive_shared_key(private_key, peer_public_key)
+
+        set_session_key(peer_username, shared_key)
+        remove_pending_key_exchange(peer_username)
+
+        if get_current_partner() is None:
+            set_current_partner(peer_username)
+
+        print(f"[KEYX] Accepted key exchange from {peer_username}.")
+        print(f"[KEYX] Accepted fingerprint: {fingerprint}")
+        print(f"[KEYX] Shared session key established with {peer_username}.")
+
+        # If we have not already sent our public key to this user, send it now.
+        # This lets the other side complete the exchange manually as well.
+        if not has_sent_key_exchange_to(peer_username):
+            send_key_exchange(client_socket, username, peer_username)
+
+    except Exception as e:
+        print(f"[KEYX ERROR] Could not accept key exchange from {peer_username}: {e}")
 
 
 def chat_loop(client_socket: socket.socket, username: str) -> None:
     """
     Starts the plaintext chat loop.
 
-    This version is intentionally plaintext.
-    E2EE will be added in the cryptographic phase.
+    This version still sends plaintext chat messages.
+    X25519 key exchange with manual fingerprint acceptance is supported.
+    AES-GCM encrypted messaging will be added in the next phase.
     """
     receiver_thread = threading.Thread(
         target=receive_messages,
@@ -216,6 +404,49 @@ def chat_loop(client_socket: socket.socket, username: str) -> None:
 
             continue
 
+        if user_input == "/keys":
+            users = list_session_key_users()
+
+            if users:
+                print("Established session keys with:", ", ".join(users))
+            else:
+                print("No session keys established yet.")
+
+            continue
+
+        if user_input == "/pending":
+            pending_users = list_pending_key_exchanges()
+
+            if pending_users:
+                print("Pending key exchange requests from:", ", ".join(pending_users))
+                print("Use /accept username after verifying the fingerprint.")
+            else:
+                print("No pending key exchange requests.")
+
+            continue
+
+        if user_input == "/accept":
+            print("Usage: /accept username")
+            continue
+
+        if user_input.startswith("/accept "):
+            peer_username = user_input.removeprefix("/accept ").strip()
+
+            if not peer_username:
+                print("Usage: /accept username")
+                continue
+
+            if peer_username == username:
+                print("You cannot accept a key exchange from yourself.")
+                continue
+
+            handle_accept_key_exchange(client_socket, username, peer_username)
+            continue
+
+        if user_input == "/to":
+            print("Usage: /to username")
+            continue
+
         if user_input.startswith("/to "):
             partner = user_input.removeprefix("/to ").strip()
 
@@ -229,6 +460,30 @@ def chat_loop(client_socket: socket.socket, username: str) -> None:
 
             set_current_partner(partner)
             print(f"Now chatting with {partner}.")
+            continue
+
+        if user_input == "/keyx":
+            print("Usage: /keyx username")
+            continue
+
+        if user_input.startswith("/keyx "):
+            recipient = user_input.removeprefix("/keyx ").strip()
+
+            if not recipient:
+                print("Usage: /keyx username")
+                continue
+
+            if recipient == username:
+                print("You cannot perform key exchange with yourself.")
+                continue
+
+            send_key_exchange(client_socket, username, recipient)
+            set_current_partner(recipient)
+            print("[KEYX] Waiting for peer public key. Accept it with /accept username when received.")
+            continue
+
+        if user_input.startswith("/"):
+            print("Unknown command. Available commands: /to, /keyx, /pending, /accept, /keys, /who, /quit")
             continue
 
         recipient = get_current_partner()
@@ -249,6 +504,8 @@ def main() -> None:
     """
     Starts the client application.
     """
+    global private_key, public_key_b64
+
     client_socket = None
 
     try:
@@ -258,7 +515,12 @@ def main() -> None:
         username = main_menu(client_socket)
 
         if username:
+            private_key, public_key_b64 = generate_x25519_key_pair()
+
             print(f"\nWelcome, {username}.")
+            print("[KEYX] X25519 key pair generated for this session.")
+            print(f"[KEYX] Your public key fingerprint: {fingerprint_public_key(public_key_b64)}")
+
             chat_loop(client_socket, username)
 
     except ConnectionRefusedError:
