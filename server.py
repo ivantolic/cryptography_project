@@ -9,16 +9,58 @@ from protocol import receive_json, send_json, make_success, make_error
 HOST = "127.0.0.1"
 PORT = 5000
 
+connected_clients: dict[str, socket.socket] = {}
+clients_lock = threading.Lock()
+
+
+def register_connected_user(username: str, client_socket: socket.socket) -> None:
+    """
+    Stores an authenticated user's socket connection.
+    """
+    with clients_lock:
+        connected_clients[username] = client_socket
+
+
+def remove_connected_user(username: Optional[str]) -> None:
+    """
+    Removes a disconnected user from the active clients list.
+    """
+    if username is None:
+        return
+
+    with clients_lock:
+        if username in connected_clients:
+            del connected_clients[username]
+
+
+def forward_chat_message(message: dict) -> bool:
+    """
+    Forwards a chat message to the intended recipient.
+
+    Returns True if the recipient is online, False otherwise.
+    """
+    recipient = message.get("to")
+
+    with clients_lock:
+        recipient_socket = connected_clients.get(recipient)
+
+    if recipient_socket is None:
+        return False
+
+    send_json(recipient_socket, message)
+    return True
+
 
 def handle_client(client_socket: socket.socket, client_address: tuple) -> None:
     """
     Handles one connected client.
 
-    In this version, the server supports:
+    Supported phases in this version:
     - register
     - login
+    - plaintext chat forwarding
 
-    Chat and encryption will be added later.
+    E2EE will be added later.
     """
     print(f"[NEW CONNECTION] {client_address} connected.")
 
@@ -49,10 +91,33 @@ def handle_client(client_socket: socket.socket, client_address: tuple) -> None:
 
                 if success:
                     authenticated_user = username
+                    register_connected_user(username, client_socket)
+
                     send_json(client_socket, make_success("Login successful."))
                     print(f"[LOGIN] User '{username}' logged in from {client_address}.")
                 else:
                     send_json(client_socket, make_error("Invalid username or password."))
+
+            elif message_type == "chat":
+                if authenticated_user is None:
+                    send_json(client_socket, make_error("You must be logged in before sending messages."))
+                    continue
+
+                sender = message.get("from")
+                recipient = message.get("to")
+                plaintext = message.get("message")
+
+                if sender != authenticated_user:
+                    send_json(client_socket, make_error("Sender username does not match authenticated user."))
+                    continue
+
+                delivered = forward_chat_message(message)
+
+                if delivered:
+                    print(f"[CHAT] {sender} -> {recipient}: {plaintext}")
+                    send_json(client_socket, make_success("Message delivered."))
+                else:
+                    send_json(client_socket, make_error(f"User '{recipient}' is not online."))
 
             elif message_type == "logout":
                 if authenticated_user:
@@ -71,19 +136,18 @@ def handle_client(client_socket: socket.socket, client_address: tuple) -> None:
         print(f"[ERROR] {client_address}: {e}")
 
     finally:
+        remove_connected_user(authenticated_user)
         client_socket.close()
         print(f"[CLOSED] Connection with {client_address} closed.")
 
 
 def start_server() -> None:
     """
-    Starts the authentication server.
+    Starts the chat server.
     """
     init_db()
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-
-    # Allows quick restart of the server after closing it.
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     server_socket.bind((HOST, PORT))
