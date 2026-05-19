@@ -123,22 +123,4 @@ def verify_user(username: str, password: str, db_name: str = DB_NAME) -> bool:
 
 if __name__ == "__main__":
     init_db()
-
-    print("SQLite authentication test")
-    print("--------------------------")
-
-    test_username = "ivan"
-    test_password = "test123"
-
-    created = register_user(test_username, test_password)
-
-    if created:
-        print(f"User '{test_username}' registered successfully.")
-    else:
-        print(f"User '{test_username}' already exists or registration failed.")
-
-    login_ok = verify_user(test_username, test_password)
-    print("Correct password login:", login_ok)
-
-    login_bad = verify_user(test_username, "wrongpassword")
-    print("Wrong password login:", login_bad)
+    print("SQLite authentication database initialized successfully.")
