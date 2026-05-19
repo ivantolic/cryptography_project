@@ -34,6 +34,12 @@ pending_key_exchanges_lock = threading.Lock()
 sent_key_exchanges_to: set[str] = set()
 sent_key_exchanges_lock = threading.Lock()
 
+outgoing_counters: dict[str, int] = {}
+outgoing_counters_lock = threading.Lock()
+
+incoming_counters: dict[str, int] = {}
+incoming_counters_lock = threading.Lock()
+
 
 def connect_to_server() -> socket.socket:
     """
@@ -44,14 +50,42 @@ def connect_to_server() -> socket.socket:
     return client_socket
 
 
-def build_associated_data(sender: str, recipient: str) -> bytes:
+def build_associated_data(sender: str, recipient: str, counter: int) -> bytes:
     """
     Builds authenticated associated data for AES-GCM.
 
     This data is not encrypted, but it is authenticated.
-    If sender/recipient metadata is modified, decryption fails.
+    If sender, recipient, or counter metadata is modified, decryption fails.
     """
-    return f"{sender}|{recipient}".encode("utf-8")
+    return f"{sender}|{recipient}|{counter}".encode("utf-8")
+
+
+def get_next_outgoing_counter(recipient: str) -> int:
+    """
+    Returns the next outgoing message counter for a recipient.
+    """
+    with outgoing_counters_lock:
+        current_value = outgoing_counters.get(recipient, 0)
+        next_value = current_value + 1
+        outgoing_counters[recipient] = next_value
+        return next_value
+
+
+def is_replay_or_old_message(sender: str, counter: int) -> bool:
+    """
+    Checks whether an incoming message counter is old or replayed.
+    """
+    with incoming_counters_lock:
+        last_seen = incoming_counters.get(sender, 0)
+        return counter <= last_seen
+
+
+def mark_counter_seen(sender: str, counter: int) -> None:
+    """
+    Stores the highest accepted counter for a sender.
+    """
+    with incoming_counters_lock:
+        incoming_counters[sender] = counter
 
 
 def set_current_partner(username: str) -> None:
@@ -244,9 +278,8 @@ def receive_messages(client_socket: socket.socket, own_username: str) -> None:
     """
     Continuously listens for incoming messages from the server.
 
-    Chat messages are expected to be AES-GCM encrypted.
-    Key exchange messages are stored as pending requests and must be
-    manually accepted with /accept username.
+    Chat messages are expected to be AES-GCM encrypted and protected
+    against basic replay using monotonically increasing counters.
     """
     while True:
         try:
@@ -257,9 +290,20 @@ def receive_messages(client_socket: socket.socket, own_username: str) -> None:
                 sender = message.get("from")
                 nonce_b64 = message.get("nonce")
                 ciphertext_b64 = message.get("ciphertext")
+                counter = message.get("counter")
 
-                if not sender or not nonce_b64 or not ciphertext_b64:
+                if not sender or not nonce_b64 or not ciphertext_b64 or counter is None:
                     print("\n[SECURITY ERROR] Invalid encrypted chat message format.")
+                    print("> ", end="", flush=True)
+                    continue
+
+                if not isinstance(counter, int) or counter <= 0:
+                    print("\n[SECURITY ERROR] Invalid message counter.")
+                    print("> ", end="", flush=True)
+                    continue
+
+                if is_replay_or_old_message(sender, counter):
+                    print(f"\n[SECURITY ERROR] Possible replay attack from {sender}. Counter {counter} was already used or is too old.")
                     print("> ", end="", flush=True)
                     continue
 
@@ -271,13 +315,15 @@ def receive_messages(client_socket: socket.socket, own_username: str) -> None:
                     continue
 
                 try:
-                    associated_data = build_associated_data(sender, own_username)
+                    associated_data = build_associated_data(sender, own_username, counter)
                     plaintext = decrypt_message(
                         session_key,
                         nonce_b64,
                         ciphertext_b64,
                         associated_data,
                     )
+
+                    mark_counter_seen(sender, counter)
 
                     print(f"\n[{sender}] {plaintext}")
 
@@ -320,7 +366,6 @@ def receive_messages(client_socket: socket.socket, own_username: str) -> None:
                 status = message.get("status", "").upper()
                 text = message.get("message", "")
 
-                # Avoid printing noisy confirmations for every sent message/key.
                 if text not in ("Message delivered.", "Public key delivered."):
                     print(f"\n[{status}] {text}")
                     print("> ", end="", flush=True)
@@ -365,9 +410,6 @@ def print_chat_help() -> None:
 def handle_accept_key_exchange(client_socket: socket.socket, username: str, peer_username: str) -> None:
     """
     Accepts a pending key exchange request.
-
-    This derives and stores the shared session key. If this client has not yet
-    sent its own public key to the peer, it sends it as a response.
     """
     global private_key
 
@@ -395,8 +437,6 @@ def handle_accept_key_exchange(client_socket: socket.socket, username: str, peer
         print(f"[KEYX] Accepted fingerprint: {fingerprint}")
         print(f"[KEYX] Shared session key established with {peer_username}.")
 
-        # If we have not already sent our public key to this user, send it now.
-        # This lets the other side complete the exchange manually as well.
         if not has_sent_key_exchange_to(peer_username):
             send_key_exchange(client_socket, username, peer_username)
 
@@ -423,7 +463,9 @@ def send_encrypted_chat_message(
         return
 
     try:
-        associated_data = build_associated_data(sender, recipient)
+        counter = get_next_outgoing_counter(recipient)
+        associated_data = build_associated_data(sender, recipient, counter)
+
         nonce_b64, ciphertext_b64 = encrypt_message(
             session_key,
             plaintext,
@@ -435,6 +477,7 @@ def send_encrypted_chat_message(
             "from": sender,
             "to": recipient,
             "nonce": nonce_b64,
+            "counter": counter,
             "ciphertext": ciphertext_b64,
         })
 

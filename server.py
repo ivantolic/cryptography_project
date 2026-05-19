@@ -46,10 +46,6 @@ def forward_message_to_recipient(message: dict) -> bool:
     Forwards a message to the intended recipient.
 
     Used for both encrypted chat messages and key exchange messages.
-
-    Returns:
-        True if the recipient is online and the message was forwarded.
-        False otherwise.
     """
     recipient = message.get("to")
 
@@ -110,9 +106,6 @@ def handle_login(
 ) -> Optional[str]:
     """
     Handles user login.
-
-    Returns:
-        username if login succeeds, otherwise None.
     """
     username = message.get("username", "")
     password = message.get("password", "")
@@ -137,7 +130,7 @@ def handle_chat(
     """
     Handles encrypted chat forwarding.
 
-    The server only forwards nonce and ciphertext.
+    The server only forwards nonce, counter, and ciphertext.
     It does not have the session key and cannot read message contents.
     """
     if not validate_authenticated_sender(message, authenticated_user, client_socket):
@@ -147,15 +140,20 @@ def handle_chat(
     recipient = message.get("to")
     nonce = message.get("nonce")
     ciphertext = message.get("ciphertext")
+    counter = message.get("counter")
 
-    if not recipient or not nonce or not ciphertext:
+    if not recipient or not nonce or not ciphertext or counter is None:
         send_json(client_socket, make_error("Invalid encrypted chat message."))
+        return
+
+    if not isinstance(counter, int) or counter <= 0:
+        send_json(client_socket, make_error("Invalid message counter."))
         return
 
     delivered = forward_message_to_recipient(message)
 
     if delivered:
-        print(f"[CHAT] Encrypted message forwarded from {sender} to {recipient}.")
+        print(f"[CHAT] Encrypted message #{counter} forwarded from {sender} to {recipient}.")
         send_json(client_socket, make_success("Message delivered."))
     else:
         send_json(client_socket, make_error(f"User '{recipient}' is not online."))
