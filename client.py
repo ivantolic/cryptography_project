@@ -9,6 +9,8 @@ from crypto_utils import (
     generate_x25519_key_pair,
     derive_shared_key,
     fingerprint_public_key,
+    encrypt_message,
+    decrypt_message,
 )
 from protocol import send_json, receive_json
 
@@ -40,6 +42,16 @@ def connect_to_server() -> socket.socket:
     client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     client_socket.connect((HOST, PORT))
     return client_socket
+
+
+def build_associated_data(sender: str, recipient: str) -> bytes:
+    """
+    Builds authenticated associated data for AES-GCM.
+
+    This data is not encrypted, but it is authenticated.
+    If sender/recipient metadata is modified, decryption fails.
+    """
+    return f"{sender}|{recipient}".encode("utf-8")
 
 
 def set_current_partner(username: str) -> None:
@@ -232,7 +244,7 @@ def receive_messages(client_socket: socket.socket, own_username: str) -> None:
     """
     Continuously listens for incoming messages from the server.
 
-    Incoming chat messages are shown immediately.
+    Chat messages are expected to be AES-GCM encrypted.
     Key exchange messages are stored as pending requests and must be
     manually accepted with /accept username.
     """
@@ -243,13 +255,38 @@ def receive_messages(client_socket: socket.socket, own_username: str) -> None:
 
             if message_type == "chat":
                 sender = message.get("from")
-                plaintext = message.get("message")
+                nonce_b64 = message.get("nonce")
+                ciphertext_b64 = message.get("ciphertext")
 
-                print(f"\n[{sender}] {plaintext}")
+                if not sender or not nonce_b64 or not ciphertext_b64:
+                    print("\n[SECURITY ERROR] Invalid encrypted chat message format.")
+                    print("> ", end="", flush=True)
+                    continue
 
-                if sender and sender != own_username and get_current_partner() is None:
-                    set_current_partner(sender)
-                    print(f"[INFO] Current chat partner automatically set to '{sender}'.")
+                session_key = get_session_key(sender)
+
+                if session_key is None:
+                    print(f"\n[SECURITY ERROR] No session key with {sender}. Cannot decrypt message.")
+                    print("> ", end="", flush=True)
+                    continue
+
+                try:
+                    associated_data = build_associated_data(sender, own_username)
+                    plaintext = decrypt_message(
+                        session_key,
+                        nonce_b64,
+                        ciphertext_b64,
+                        associated_data,
+                    )
+
+                    print(f"\n[{sender}] {plaintext}")
+
+                    if sender != own_username and get_current_partner() is None:
+                        set_current_partner(sender)
+                        print(f"[INFO] Current chat partner automatically set to '{sender}'.")
+
+                except Exception:
+                    print(f"\n[SECURITY ERROR] Message from {sender} failed authentication/decryption.")
 
                 print("> ", end="", flush=True)
 
@@ -310,7 +347,7 @@ def print_chat_help() -> None:
     """
     print("\nChat started.")
     print("Commands:")
-    print("  /to username       choose who you want to send messages to")
+    print("  /to username       choose who you want to send encrypted messages to")
     print("  /keyx username     send your X25519 public key to a user")
     print("  /pending           show pending key exchange requests")
     print("  /accept username   accept a pending key exchange after verifying fingerprint")
@@ -367,13 +404,50 @@ def handle_accept_key_exchange(client_socket: socket.socket, username: str, peer
         print(f"[KEYX ERROR] Could not accept key exchange from {peer_username}: {e}")
 
 
+def send_encrypted_chat_message(
+    client_socket: socket.socket,
+    sender: str,
+    recipient: str,
+    plaintext: str,
+) -> None:
+    """
+    Encrypts and sends a chat message using AES-GCM.
+
+    A session key must already be established with the recipient.
+    """
+    session_key = get_session_key(recipient)
+
+    if session_key is None:
+        print(f"[SECURITY] No session key with {recipient}.")
+        print(f"[SECURITY] Run /keyx {recipient}, verify the fingerprint, and complete /accept first.")
+        return
+
+    try:
+        associated_data = build_associated_data(sender, recipient)
+        nonce_b64, ciphertext_b64 = encrypt_message(
+            session_key,
+            plaintext,
+            associated_data,
+        )
+
+        send_json(client_socket, {
+            "type": "chat",
+            "from": sender,
+            "to": recipient,
+            "nonce": nonce_b64,
+            "ciphertext": ciphertext_b64,
+        })
+
+    except Exception as e:
+        print(f"[SECURITY ERROR] Could not encrypt message: {e}")
+
+
 def chat_loop(client_socket: socket.socket, username: str) -> None:
     """
-    Starts the plaintext chat loop.
+    Starts the encrypted chat loop.
 
-    This version still sends plaintext chat messages.
-    X25519 key exchange with manual fingerprint acceptance is supported.
-    AES-GCM encrypted messaging will be added in the next phase.
+    Messages are encrypted with AES-GCM after an X25519/HKDF session key
+    has been established with the recipient.
     """
     receiver_thread = threading.Thread(
         target=receive_messages,
@@ -492,12 +566,7 @@ def chat_loop(client_socket: socket.socket, username: str) -> None:
             print("No chat partner selected. Use: /to username")
             continue
 
-        send_json(client_socket, {
-            "type": "chat",
-            "from": username,
-            "to": recipient,
-            "message": user_input,
-        })
+        send_encrypted_chat_message(client_socket, username, recipient, user_input)
 
 
 def main() -> None:

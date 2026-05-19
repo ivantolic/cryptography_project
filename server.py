@@ -45,7 +45,7 @@ def forward_message_to_recipient(message: dict) -> bool:
     """
     Forwards a message to the intended recipient.
 
-    Used for both chat messages and key exchange messages.
+    Used for both encrypted chat messages and key exchange messages.
 
     Returns:
         True if the recipient is online and the message was forwarded.
@@ -135,22 +135,27 @@ def handle_chat(
     client_socket: socket.socket,
 ) -> None:
     """
-    Handles plaintext chat forwarding.
+    Handles encrypted chat forwarding.
 
-    This will later be replaced with encrypted message forwarding.
-    For now, the server still sees plaintext.
+    The server only forwards nonce and ciphertext.
+    It does not have the session key and cannot read message contents.
     """
     if not validate_authenticated_sender(message, authenticated_user, client_socket):
         return
 
     sender = message.get("from")
     recipient = message.get("to")
-    plaintext = message.get("message")
+    nonce = message.get("nonce")
+    ciphertext = message.get("ciphertext")
+
+    if not recipient or not nonce or not ciphertext:
+        send_json(client_socket, make_error("Invalid encrypted chat message."))
+        return
 
     delivered = forward_message_to_recipient(message)
 
     if delivered:
-        print(f"[CHAT] {sender} -> {recipient}: {plaintext}")
+        print(f"[CHAT] Encrypted message forwarded from {sender} to {recipient}.")
         send_json(client_socket, make_success("Message delivered."))
     else:
         send_json(client_socket, make_error(f"User '{recipient}' is not online."))
@@ -191,12 +196,10 @@ def handle_client(client_socket: socket.socket, client_address: tuple) -> None:
     """
     Handles one connected client.
 
-    Supported phases in this version:
+    Supported phases:
     - authentication phase: register/login
-    - key exchange phase: public key forwarding
-    - message transmission phase: plaintext chat forwarding for now
-
-    E2EE encrypted message transmission will be added next.
+    - key exchange phase: X25519 public key forwarding
+    - secure message transmission phase: AES-GCM encrypted message forwarding
     """
     print(f"[NEW CONNECTION] {client_address} connected.")
 
