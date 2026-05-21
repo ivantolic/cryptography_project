@@ -111,7 +111,7 @@ Client (user: Pero):
   shows fingerprint
   user accepts with /accept marko
   creates the same shared secret
-
+```
 Both clients:
   use HKDF-SHA256 to derive the AES session key
 
@@ -132,7 +132,7 @@ The chat message contains the sender, receiver, nonce, counter, and ciphertext. 
   "counter": 1,
   "ciphertext": "..."
 }
-
+```
 ## 8. Replay and Tampering Protection
 
 The application also needs to handle two basic problems: message tampering and replay attacks. Message tampering means that someone tries to change a message while it is being sent. A replay attack means that someone sends the same old encrypted message again and tries to make it look like a new message.
