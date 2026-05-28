@@ -2,15 +2,15 @@
 
 This is a Python project for the Applied Cryptography course.
 
-The application is a real-time chat system with:
+The project is a secure real-time chat application with:
 - user registration and login
-- end-to-end encrypted messages
+- end-to-end encrypted chat messages
 - X25519 Diffie-Hellman key exchange
 - manual public key fingerprint verification
 - AES-GCM encryption
 - replay protection with message counters
 
-The server only forwards messages. It cannot read encrypted chat messages because it does not have the session keys.
+The server is used only to connect clients and forward data. It cannot read encrypted chat messages because it does not have the session keys.
 
 ---
 
@@ -31,11 +31,11 @@ cryptography_project/
 
 | File | Description |
 |---|---|
-| `server.py` | Server that handles users and forwards encrypted messages |
-| `client.py` | Terminal chat client |
-| `crypto_utils.py` | Cryptographic functions |
-| `auth_utils.py` | User authentication and SQLite database |
-| `protocol.py` | JSON socket communication |
+| `server.py` | Server that accepts clients and forwards public keys and encrypted messages |
+| `client.py` | Terminal chat client used by users |
+| `crypto_utils.py` | Cryptographic functions for key exchange, key derivation, encryption, and decryption |
+| `auth_utils.py` | User registration, login, password hashing, and SQLite database |
+| `protocol.py` | JSON socket communication with message length headers |
 
 ---
 
@@ -43,28 +43,33 @@ cryptography_project/
 
 Python 3.10 or newer is recommended.
 
-Install dependencies:
-
-```powershell
-pip install -r requirements.txt
-```
-
-The SQLite database `chat.db` is created automatically when the server starts.
-
 Main dependency:
 
 ```text
 cryptography
 ```
 
+Install all dependencies with:
+
+```powershell
+pip install -r requirements.txt
+```
+
+The SQLite database `chat.db` is created automatically when the server starts. It is used for local user accounts.
+
 ---
 
 ## Setup
 
-Create and activate a virtual environment:
+Create a virtual environment:
 
 ```powershell
 python -m venv .venv
+```
+
+Activate it on Windows PowerShell:
+
+```powershell
 .venv\Scripts\activate
 ```
 
@@ -76,11 +81,11 @@ pip install -r requirements.txt
 
 ---
 
-## How to Run
+## How to Run the Application
 
-Use three terminals.
+Use three separate terminals.
 
-### Terminal 1: start server
+### Terminal 1: Start the server
 
 ```powershell
 python server.py
@@ -93,7 +98,11 @@ Expected output:
 Listening on 127.0.0.1:5000
 ```
 
-### Terminal 2: start first client
+Leave the server running.
+
+---
+
+### Terminal 2: Start the first client
 
 ```powershell
 python client.py
@@ -105,7 +114,9 @@ Register or login as the first user, for example:
 pero
 ```
 
-### Terminal 3: start second client
+---
+
+### Terminal 3: Start the second client
 
 ```powershell
 python client.py
@@ -117,13 +128,15 @@ Register or login as the second user, for example:
 marko
 ```
 
+Both users must be online at the same time for real-time messaging.
+
 ---
 
-## Basic Usage
+## Basic Test Flow
 
-After login, the client shows available commands.
+This is the recommended flow for testing the application.
 
-### Select chat partner
+### 1. Select a chat partner
 
 On Pero's client:
 
@@ -131,7 +144,15 @@ On Pero's client:
 /to marko
 ```
 
-### Start key exchange
+Expected output:
+
+```text
+Now chatting with marko.
+```
+
+---
+
+### 2. Start key exchange
 
 On Pero's client:
 
@@ -139,9 +160,11 @@ On Pero's client:
 /keyx marko
 ```
 
-Marko will receive a key exchange request with a public key fingerprint.
+Marko should receive a key exchange request with a public key fingerprint.
 
-### Accept key exchange
+---
+
+### 3. Accept key exchange on Marko's client
 
 On Marko's client:
 
@@ -149,27 +172,37 @@ On Marko's client:
 /accept pero
 ```
 
-Then Pero receives Marko's public key and accepts it:
+Marko should establish a session key with Pero and send his public key back.
+
+---
+
+### 4. Accept key exchange on Pero's client
+
+On Pero's client:
 
 ```text
 /accept marko
 ```
 
-Now both clients have a shared session key.
+Now both clients should have the same shared session key.
 
-Check session keys:
+---
+
+### 5. Check established session keys
+
+On both clients, run:
 
 ```text
 /keys
 ```
 
-Expected result:
+Expected output on Pero's client:
 
 ```text
 Established session keys with: marko
 ```
 
-or:
+Expected output on Marko's client:
 
 ```text
 Established session keys with: pero
@@ -177,27 +210,27 @@ Established session keys with: pero
 
 ---
 
-## Sending Messages
+### 6. Send encrypted messages
 
-After key exchange is complete, users can send encrypted messages.
-
-Example on Pero's client:
+On Pero's client:
 
 ```text
 bok marko
 ```
 
-Marko sees:
+Marko should see:
 
 ```text
 [pero] bok marko
 ```
 
-The server does not see the plaintext message. It only shows:
+On the server, the plaintext message should not be shown. The server should show only encrypted forwarding information, for example:
 
 ```text
 [CHAT] Encrypted message #1 forwarded from pero to marko.
 ```
+
+This shows that the server forwards the message but does not read the message content.
 
 ---
 
@@ -205,13 +238,13 @@ The server does not see the plaintext message. It only shows:
 
 | Command | Purpose |
 |---|---|
-| `/to username` | Choose chat partner |
-| `/keyx username` | Start key exchange |
+| `/to username` | Choose who to send messages to |
+| `/keyx username` | Start X25519 key exchange with a user |
 | `/pending` | Show pending key exchange requests |
-| `/accept username` | Accept key exchange |
-| `/keys` | Show users with session keys |
+| `/accept username` | Accept a pending key exchange after checking the fingerprint |
+| `/keys` | Show users with established session keys |
 | `/who` | Show current chat partner |
-| `/quit` | Exit chat |
+| `/quit` | Exit the chat |
 
 ---
 
@@ -226,23 +259,25 @@ Passwords are not stored as plain text. The application stores:
 - random salt
 - PBKDF2-HMAC-SHA256 password hash
 
-User data is stored in local SQLite database `chat.db`.
+User data is stored in a local SQLite database called `chat.db`.
 
 ---
 
 ### Key Exchange
 
-The application uses X25519 Diffie-Hellman.
+The application uses X25519 Diffie-Hellman for key exchange.
 
-Each client creates a private/public key pair. Public keys are sent through the server, but private keys stay only on the clients.
+Each client creates a private and public key pair. Public keys are sent through the server, but private keys stay only on the clients.
 
-After key exchange, both clients calculate the same shared secret. HKDF-SHA256 is then used to create an AES session key.
+After public keys are exchanged and accepted, both clients calculate the same shared secret. HKDF-SHA256 is then used to derive a 256-bit AES session key.
+
+The session key is stored only in memory. If the client is restarted, users need to perform key exchange again.
 
 ---
 
 ### Fingerprint Verification
 
-When a public key is received, the client shows a fingerprint.
+When a public key is received, the client shows a public key fingerprint.
 
 Example:
 
@@ -256,7 +291,7 @@ The user must manually accept the key exchange:
 /accept username
 ```
 
-This helps reduce the risk of man-in-the-middle attacks.
+This helps reduce the risk of public key substitution or man-in-the-middle attacks during key exchange. It is still manual verification and does not replace certificates or a full PKI system.
 
 ---
 
@@ -264,7 +299,7 @@ This helps reduce the risk of man-in-the-middle attacks.
 
 Messages are encrypted on the sender's client and decrypted only on the receiver's client.
 
-The server only sees:
+The encrypted message that goes through the server contains:
 
 ```text
 sender
@@ -274,20 +309,20 @@ counter
 ciphertext
 ```
 
-The server does not have the session key, so it cannot decrypt messages.
+The server does not have the AES session key, so it cannot decrypt chat messages.
 
 ---
 
 ### Message Protection
 
-The application uses AES-GCM.
+The application uses AES-GCM for encrypted messages.
 
 AES-GCM provides:
 - confidentiality
 - integrity
 - authentication
 
-If an attacker changes the ciphertext, nonce, counter, sender, or receiver data, decryption fails.
+If an attacker changes the ciphertext, nonce, counter, sender, or receiver data, decryption fails and the message is rejected.
 
 ---
 
@@ -295,7 +330,7 @@ If an attacker changes the ciphertext, nonce, counter, sender, or receiver data,
 
 Every encrypted message has a counter.
 
-Example:
+Example encrypted message format:
 
 ```json
 {
@@ -308,27 +343,30 @@ Example:
 }
 ```
 
-The receiver remembers the last counter from each sender. If an old counter appears again, the message is rejected.
+The receiver remembers the last accepted counter from each sender. If the same old counter or a lower counter appears again, the message is rejected as a possible replay attack.
 
 ---
 
 ## Limitations
 
-This is an educational prototype.
+This application is a student prototype and is designed for local testing.
 
 Limitations:
 - no offline messages
-- session keys are only stored in memory
-- after restart, users must do key exchange again
-- no PKI or certificates
+- both users must be online at the same time
+- session keys are stored only in memory
+- after restart, users must perform key exchange again
+- no certificates or public key infrastructure
 - fingerprint verification is manual
+- no multi-factor authentication
+- no password reset or account lockout
 - designed for local testing on `127.0.0.1`
 
 ---
 
 ## Git Notes
 
-Do not commit these files:
+Do not commit local or generated files such as:
 
 ```text
 .venv/
@@ -337,6 +375,25 @@ __pycache__/
 .env
 *.key
 *.pem
+*.db
 ```
 
 These files are ignored in `.gitignore`.
+
+---
+
+## Security Report
+
+The written security analysis document is located in:
+
+```text
+docs/security_report.md
+```
+
+The report explains:
+- security goals and threat model
+- design choices
+- cryptographic primitives
+- protocol flow
+- key management
+- security assumptions and limitations
