@@ -3,14 +3,19 @@
 This is a Python project for the Applied Cryptography course.
 
 The project is a secure real-time chat application with:
-- user registration and login
-- end-to-end encrypted chat messages
-- X25519 Diffie-Hellman key exchange
-- manual public key fingerprint verification
-- AES-GCM encryption
-- replay protection with message counters
 
-The server is used only to connect clients and forward data. It cannot read encrypted chat messages because it does not have the session keys.
+* user registration and login
+* TLS-protected client-server transport
+* end-to-end encrypted chat messages
+* X25519 Diffie-Hellman key exchange
+* manual public key fingerprint verification
+* HKDF-SHA256 key derivation
+* AES-GCM encryption
+* replay protection with message counters
+
+The server is used to connect clients and forward data. It cannot read encrypted chat messages because it does not have the AES session keys.
+
+TLS is used to protect the transport between clients and the server. This prevents login data and protocol messages from being visible as plaintext in Wireshark.
 
 ---
 
@@ -23,19 +28,22 @@ cryptography_project/
 ├── crypto_utils.py
 ├── auth_utils.py
 ├── protocol.py
+├── generate_tls_cert.py
 ├── requirements.txt
 ├── README.md
-└── docs/
-    └── security_report.md
+├── security_report.md
+└── .gitignore
 ```
 
-| File | Description |
-|---|---|
-| `server.py` | Server that accepts clients and forwards public keys and encrypted messages |
-| `client.py` | Terminal chat client used by users |
-| `crypto_utils.py` | Cryptographic functions for key exchange, key derivation, encryption, and decryption |
-| `auth_utils.py` | User registration, login, password hashing, and SQLite database |
-| `protocol.py` | JSON socket communication with message length headers |
+| File                   | Description                                                                             |
+| ---------------------- | --------------------------------------------------------------------------------------- |
+| `server.py`            | TLS-enabled server that accepts clients and forwards public keys and encrypted messages |
+| `client.py`            | Terminal chat client used by users                                                      |
+| `crypto_utils.py`      | Cryptographic functions for X25519, HKDF-SHA256, AES-GCM, nonces, and fingerprints      |
+| `auth_utils.py`        | User registration, login, password hashing, and SQLite database                         |
+| `protocol.py`          | JSON socket communication with message length headers                                   |
+| `generate_tls_cert.py` | Generates local self-signed TLS certificate files for testing                           |
+| `security_report.md`   | Written security analysis document                                                      |
 
 ---
 
@@ -43,16 +51,18 @@ cryptography_project/
 
 Python 3.10 or newer is recommended.
 
-Main dependency:
-
-```text
-cryptography
-```
-
 Install all dependencies with:
 
 ```powershell
 pip install -r requirements.txt
+```
+
+The `requirements.txt` file contains:
+
+```text
+cffi==2.0.0
+cryptography==48.0.0
+pycparser==3.0
 ```
 
 The SQLite database `chat.db` is created automatically when the server starts. It is used for local user accounts.
@@ -79,6 +89,23 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+Generate local TLS certificate files:
+
+```powershell
+python generate_tls_cert.py
+```
+
+This creates:
+
+```text
+cert.pem
+key.pem
+```
+
+These files are required for running the TLS-enabled server and client.
+
+Do not commit `cert.pem` and `key.pem` to GitHub. They are local generated files and are ignored in `.gitignore`.
+
 ---
 
 ## How to Run the Application
@@ -96,6 +123,7 @@ Expected output:
 ```text
 [SERVER STARTED]
 Listening on 127.0.0.1:5000
+[TLS] TLS transport protection is enabled.
 ```
 
 Leave the server running.
@@ -106,6 +134,12 @@ Leave the server running.
 
 ```powershell
 python client.py
+```
+
+Expected output:
+
+```text
+[CONNECTED] Connected to server using TLS.
 ```
 
 Register or login as the first user, for example:
@@ -120,6 +154,12 @@ pero
 
 ```powershell
 python client.py
+```
+
+Expected output:
+
+```text
+[CONNECTED] Connected to server using TLS.
 ```
 
 Register or login as the second user, for example:
@@ -230,21 +270,21 @@ On the server, the plaintext message should not be shown. The server should show
 [CHAT] Encrypted message #1 forwarded from pero to marko.
 ```
 
-This shows that the server forwards the message but does not read the message content.
+This shows that the server forwards the encrypted message but does not read the message content.
 
 ---
 
 ## Commands
 
-| Command | Purpose |
-|---|---|
-| `/to username` | Choose who to send messages to |
-| `/keyx username` | Start X25519 key exchange with a user |
-| `/pending` | Show pending key exchange requests |
+| Command            | Purpose                                                      |
+| ------------------ | ------------------------------------------------------------ |
+| `/to username`     | Choose who to send messages to                               |
+| `/keyx username`   | Start X25519 key exchange with a user                        |
+| `/pending`         | Show pending key exchange requests                           |
 | `/accept username` | Accept a pending key exchange after checking the fingerprint |
-| `/keys` | Show users with established session keys |
-| `/who` | Show current chat partner |
-| `/quit` | Exit the chat |
+| `/keys`            | Show users with established session keys                     |
+| `/who`             | Show current chat partner                                    |
+| `/quit`            | Exit the chat                                                |
 
 ---
 
@@ -255,11 +295,46 @@ This shows that the server forwards the message but does not read the message co
 Users register with a username and password.
 
 Passwords are not stored as plain text. The application stores:
-- username
-- random salt
-- PBKDF2-HMAC-SHA256 password hash
+
+* username
+* random salt
+* PBKDF2-HMAC-SHA256 password hash
 
 User data is stored in a local SQLite database called `chat.db`.
+
+The database does not store:
+
+* plaintext passwords
+* chat messages
+* private keys
+* AES session keys
+
+The `username` is unique because it is used as the primary key. The `salt` and `password_hash` are stored as BLOB values.
+
+---
+
+### TLS Transport Protection
+
+The application uses TLS for client-server transport protection.
+
+The server uses local TLS files:
+
+```text
+cert.pem
+key.pem
+```
+
+These files are generated with:
+
+```powershell
+python generate_tls_cert.py
+```
+
+The client loads `cert.pem` when connecting to the server.
+
+TLS protects login data, registration data, public key exchange messages, and protocol JSON messages from being visible as plaintext in Wireshark.
+
+TLS does not replace end-to-end encryption. TLS protects the connection between the client and the server, while E2EE protects chat message content from the server itself.
 
 ---
 
@@ -291,7 +366,7 @@ The user must manually accept the key exchange:
 /accept username
 ```
 
-This helps reduce the risk of public key substitution or man-in-the-middle attacks during key exchange. It is still manual verification and does not replace certificates or a full PKI system.
+This helps reduce the risk of public key substitution or man-in-the-middle attacks during key exchange. It is still manual verification and does not replace a full PKI system for user identity.
 
 ---
 
@@ -318,11 +393,14 @@ The server does not have the AES session key, so it cannot decrypt chat messages
 The application uses AES-GCM for encrypted messages.
 
 AES-GCM provides:
-- confidentiality
-- integrity
-- authentication
+
+* confidentiality
+* integrity
+* authentication
 
 If an attacker changes the ciphertext, nonce, counter, sender, or receiver data, decryption fails and the message is rejected.
+
+The sender, receiver, and counter are used as associated data. This means they are not hidden, but they are protected from modification.
 
 ---
 
@@ -352,15 +430,19 @@ The receiver remembers the last accepted counter from each sender. If the same o
 This application is a student prototype and is designed for local testing.
 
 Limitations:
-- no offline messages
-- both users must be online at the same time
-- session keys are stored only in memory
-- after restart, users must perform key exchange again
-- no certificates or public key infrastructure
-- fingerprint verification is manual
-- no multi-factor authentication
-- no password reset or account lockout
-- designed for local testing on `127.0.0.1`
+
+* no offline messages
+* both users must be online at the same time
+* session keys are stored only in memory
+* after restart, users must perform key exchange again
+* uses a self-signed TLS certificate for local testing
+* no full public key infrastructure for user identity
+* fingerprint verification is manual
+* no multi-factor authentication
+* no password reset or account lockout
+* no password strength rules
+* does not protect against a compromised client device
+* designed for local testing on `127.0.0.1`
 
 ---
 
@@ -371,6 +453,8 @@ Do not commit local or generated files such as:
 ```text
 .venv/
 chat.db
+cert.pem
+key.pem
 __pycache__/
 .env
 *.key
@@ -380,6 +464,8 @@ __pycache__/
 
 These files are ignored in `.gitignore`.
 
+The file `generate_tls_cert.py` can be committed because it is only a script for generating local TLS files. It does not contain secret keys.
+
 ---
 
 ## Security Report
@@ -387,13 +473,15 @@ These files are ignored in `.gitignore`.
 The written security analysis document is located in:
 
 ```text
-docs/security_report.md
+security_report.md
 ```
 
 The report explains:
-- security goals and threat model
-- design choices
-- cryptographic primitives
-- protocol flow
-- key management
-- security assumptions and limitations
+
+* security goals and threat model
+* design choices
+* cryptographic primitives
+* protocol flow
+* TLS transport protection
+* key management
+* security assumptions and limitations
