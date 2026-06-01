@@ -1,4 +1,5 @@
 import socket
+import ssl
 import threading
 from typing import Optional
 
@@ -9,8 +10,25 @@ from protocol import receive_json, send_json, make_success, make_error
 HOST = "127.0.0.1"
 PORT = 5000
 
+# Local TLS certificate and private key for client-server transport protection.
+# These files are generated locally with generate_tls_cert.py.
+CERT_FILE = "cert.pem"
+KEY_FILE = "key.pem"
+
 connected_clients: dict[str, socket.socket] = {}
 clients_lock = threading.Lock()
+
+
+def create_tls_context() -> ssl.SSLContext:
+    """
+    Creates the TLS context used by the server.
+
+    TLS protects the transport between clients and server.
+    End-to-end encryption for chat messages is still handled separately by the clients.
+    """
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(certfile=CERT_FILE, keyfile=KEY_FILE)
+    return context
 
 
 def register_connected_user(username: str, client_socket: socket.socket) -> None:
@@ -199,7 +217,7 @@ def handle_client(client_socket: socket.socket, client_address: tuple) -> None:
     - key exchange phase: X25519 public key forwarding
     - secure message transmission phase: AES-GCM encrypted message forwarding
     """
-    print(f"[NEW CONNECTION] {client_address} connected.")
+    print(f"[NEW TLS CONNECTION] {client_address} connected.")
 
     authenticated_user: Optional[str] = None
 
@@ -233,6 +251,9 @@ def handle_client(client_socket: socket.socket, client_address: tuple) -> None:
     except ConnectionError:
         print(f"[DISCONNECTED] {client_address} disconnected.")
 
+    except ssl.SSLError as e:
+        print(f"[TLS ERROR] {client_address}: {e}")
+
     except Exception as e:
         print(f"[ERROR] {client_address}: {e}")
 
@@ -244,9 +265,16 @@ def handle_client(client_socket: socket.socket, client_address: tuple) -> None:
 
 def start_server() -> None:
     """
-    Starts the chat server.
+    Starts the chat server with TLS enabled.
     """
     init_db()
+
+    try:
+        tls_context = create_tls_context()
+    except FileNotFoundError:
+        print("[ERROR] cert.pem or key.pem was not found.")
+        print("[ERROR] Generate TLS files first with: python generate_tls_cert.py")
+        return
 
     server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -256,14 +284,26 @@ def start_server() -> None:
 
     print("[SERVER STARTED]")
     print(f"Listening on {HOST}:{PORT}")
+    print("[TLS] TLS transport protection is enabled.")
 
     try:
         while True:
-            client_socket, client_address = server_socket.accept()
+            raw_client_socket, client_address = server_socket.accept()
+
+            try:
+                tls_client_socket = tls_context.wrap_socket(
+                    raw_client_socket,
+                    server_side=True,
+                )
+
+            except ssl.SSLError as e:
+                print(f"[TLS ERROR] Handshake failed from {client_address}: {e}")
+                raw_client_socket.close()
+                continue
 
             client_thread = threading.Thread(
                 target=handle_client,
-                args=(client_socket, client_address),
+                args=(tls_client_socket, client_address),
                 daemon=True,
             )
 

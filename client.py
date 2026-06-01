@@ -1,4 +1,5 @@
 import socket
+import ssl
 import getpass
 import threading
 from typing import Optional
@@ -17,6 +18,10 @@ from protocol import send_json, receive_json
 
 HOST = "127.0.0.1"
 PORT = 5000
+
+# Local TLS certificate used for client-server transport protection.
+# The certificate is generated locally with generate_tls_cert.py.
+CERT_FILE = "cert.pem"
 
 
 current_partner: Optional[str] = None
@@ -41,13 +46,24 @@ incoming_counters: dict[str, int] = {}
 incoming_counters_lock = threading.Lock()
 
 
-def connect_to_server() -> socket.socket:
+def connect_to_server() -> ssl.SSLSocket:
     """
-    Connects the client to the local chat server.
+    Connects the client to the local chat server using TLS.
+
+    TLS protects the transport between client and server.
+    End-to-end encryption is still handled separately with X25519/HKDF/AES-GCM.
     """
-    client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    client_socket.connect((HOST, PORT))
-    return client_socket
+    context = ssl.create_default_context(cafile=CERT_FILE)
+
+    # For this local prototype, hostname checking is disabled because the
+    # certificate is self-signed and generated locally for localhost testing.
+    # The certificate itself is still loaded from cert.pem.
+    context.check_hostname = False
+
+    raw_socket = socket.create_connection((HOST, PORT))
+    tls_socket = context.wrap_socket(raw_socket, server_hostname="localhost")
+
+    return tls_socket
 
 
 def build_associated_data(sender: str, recipient: str, counter: int) -> bytes:
@@ -622,7 +638,7 @@ def main() -> None:
 
     try:
         client_socket = connect_to_server()
-        print("[CONNECTED] Connected to server.")
+        print("[CONNECTED] Connected to server using TLS.")
 
         username = main_menu(client_socket)
 
@@ -634,6 +650,13 @@ def main() -> None:
             print(f"[KEYX] Your public key fingerprint: {fingerprint_public_key(public_key_b64)}")
 
             chat_loop(client_socket, username)
+
+    except FileNotFoundError:
+        print("[ERROR] cert.pem was not found.")
+        print("[ERROR] Generate TLS files first with: python generate_tls_cert.py")
+
+    except ssl.SSLError as e:
+        print(f"[TLS ERROR] Could not establish TLS connection: {e}")
 
     except ConnectionRefusedError:
         print("[ERROR] Could not connect to server. Is server.py running?")
